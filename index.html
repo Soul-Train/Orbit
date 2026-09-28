@@ -614,6 +614,38 @@
   .tdEditor h4 { margin: 0 0 9px; font-family: var(--meta); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
   .tdEditor h4.mt { margin-top: 4px; }
   .tdOpt { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 9px; }
+  /* Small enough to ignore, readable when you look for it. Right aligned so it sits under the Add
+     button rather than under the board, and it takes no height when sync is off. */
+  .syncStamp { text-align: right; font-family: var(--meta); font-size: 11px; color: var(--muted);
+    opacity: .55; padding: 0 4px 4px 0; letter-spacing: .03em; cursor: pointer; }
+  .syncStamp[hidden] { display: none; }
+  .syncStamp.warn { color: var(--warm); opacity: .75; }
+
+  .syncScrim { position: fixed; inset: 0; background: rgba(6,14,16,.62); z-index: 19; }
+  /* Anchored to the top of the screen on purpose. The Android keyboard opening is a window resize,
+     and anything centred or bottom anchored gets shoved or re-measured the moment a field is
+     focused. This panel is nothing but fields, so it stays where it is put. */
+  .syncSheet { position: fixed; left: 50%; transform: translateX(-50%); top: 18px; width: min(360px, calc(100vw - 28px));
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; z-index: 20;
+    padding: 16px 16px 14px; max-height: calc(100vh - 36px); overflow-y: auto; }
+  .syncSheet[hidden], .syncScrim[hidden] { display: none; }
+  .syncSheet h3 { margin: 0 0 3px; font-size: 16px; font-weight: 600; color: var(--ink); }
+  .syncSheet .sub { font-size: 12.5px; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
+  .syncSheet label { display: block; font-size: 11.5px; color: var(--muted); margin: 0 0 4px; letter-spacing: .04em; }
+  .syncSheet input { width: 100%; box-sizing: border-box; margin: 0 0 12px; }
+  .syncSheet .hint { font-size: 11.5px; color: var(--muted); margin: -8px 0 12px; }
+  .syncSheet .rows { border-top: 1px solid var(--line); padding-top: 10px; margin: 0 0 14px; font-size: 13px; }
+  .syncSheet .rows div { display: flex; justify-content: space-between; padding: 3px 0; }
+  .syncSheet .rows span.k { color: var(--muted); }
+  .syncSheet .acts { display: grid; gap: 8px; }
+  .syncSheet .acts button { width: 100%; padding: 11px; border-radius: 10px; border: 1px solid var(--line);
+    background: rgba(22,38,42,.75); color: var(--ink); font-family: inherit; font-size: 14px; cursor: pointer; }
+  .syncSheet .acts button.danger { color: var(--hot); border-color: rgba(233,105,78,.4); }
+  .syncSheet .msg { font-size: 12.5px; margin: 10px 0 0; color: var(--muted); line-height: 1.5; }
+  .syncSheet .msg.bad { color: var(--hot); }
+  .syncSheet .msg.good { color: var(--calm); }
+  .syncSheet .steps { font-size: 12px; color: var(--muted); line-height: 1.65; margin: 10px 0 0; }
+  .syncSheet .steps b { color: var(--ink); font-weight: 600; }
   .tdOpt.center { justify-content: center; }
   /* The number field defaults to full width like every other input in this panel, which would push
      the unit buttons onto their own line and break the sentence the row is trying to read as. */
@@ -1741,6 +1773,9 @@
   </div>
   <div class="deckSlot" id="deckSlot"><div class="dailybar" id="dailyBar"></div></div>
   <div class="mobMenu" id="mobMenu" hidden></div>
+
+  <div class="syncScrim" id="syncScrim" hidden></div>
+  <div class="syncSheet" id="syncSheet" hidden></div>
   <div class="addScrim" id="addScrim" hidden></div>
   <div class="addSheet" id="addSheet" hidden>
     <div class="asGrab"></div>
@@ -1815,6 +1850,8 @@
       <p class="hint" id="hint"></p>
     </div>
   </div>
+
+  <div class="syncStamp" id="syncStamp" hidden></div>
 
   <div class="cmdArea" id="cmdArea">
   <div class="addbar" id="addBar" hidden>
@@ -2852,6 +2889,141 @@
   const SNAP_KEY = "lifeboard:snapshots";
   const BROKEN_KEY = "lifeboard:tree.broken";
   const SNAP_KEEP = 3;
+  const BASE_KEY = "lifeboard:tree.base";
+
+  /* ===== Merging two boards =====
+     Two devices edit the same board and both have a claim on it. Comparing them alone settles
+     nothing: a task on one side and not the other might have been added there or deleted here, and
+     those two look identical from the outside. So the board as it stood at the last sync is kept as
+     well, and every question is asked against that instead. Added means absent in the base. Deleted
+     means present in the base and gone now. Edited means different from the base. Each of those has
+     exactly one answer, and only a field both sides moved since the base has none.
+
+     Nodes carry stable ids, so this walks by id rather than by position. */
+  const MERGE_SKIP = { id: 1, children: 1, history: 1 };
+
+  function indexById(node, into) {
+    into = into || {};
+    if (!node || !node.id) return into;
+    into[node.id] = node;
+    if (node.children) node.children.forEach(c => indexById(c, into));
+    return into;
+  }
+  function sameValue(a, b) {
+    if (a === b) return true;
+    if (a == null && b == null) return true;
+    if (a == null || b == null) return false;
+    if (typeof a !== typeof b) return false;
+    if (typeof a === "object") { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return false; } }
+    return false;
+  }
+  // Ticks never have to be chosen between. Every entry is its own event, so both sides keep theirs.
+  // Same day and same note means the same tick arriving twice, not two separate ticks.
+  function mergeHistory(base, mine, theirs) {
+    const seen = {}, out = [];
+    [mine || [], theirs || []].forEach(list => list.forEach(e => {
+      if (!e) return;
+      const k = (e.date || "") + "|" + (e.note || "");
+      if (seen[k]) return;
+      seen[k] = 1; out.push(e);
+    }));
+    out.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+    return out;
+  }
+  /* Fields are settled one at a time rather than a whole node at a time, so an importance changed
+     here and a note written there both survive instead of one quietly overwriting the other. */
+  function mergeFields(baseNode, mine, theirs, name, conflicts) {
+    const out = {}, keys = {};
+    [baseNode || {}, mine || {}, theirs || {}].forEach(o => Object.keys(o).forEach(k => { keys[k] = 1; }));
+    Object.keys(keys).forEach(k => {
+      if (MERGE_SKIP[k]) return;
+      const b = baseNode ? baseNode[k] : undefined, m = mine ? mine[k] : undefined, t = theirs ? theirs[k] : undefined;
+      const mChanged = !sameValue(m, b), tChanged = !sameValue(t, b);
+      if (mChanged && !tChanged) { if (m !== undefined) out[k] = m; return; }
+      if (!mChanged && tChanged) { if (t !== undefined) out[k] = t; return; }
+      if (sameValue(m, t)) { if (m !== undefined) out[k] = m; return; }
+      // Both moved it since the base, so there is no way to know which is right.
+      conflicts.push({ id: (mine || theirs).id, name: name, field: k, mine: m, theirs: t });
+      if (m !== undefined) out[k] = m; // hold this device's value until the person answers
+    });
+    out.id = (mine || theirs || baseNode).id;
+    return out;
+  }
+  function mergeNode(baseNode, mine, theirs, conflicts) {
+    const name = (mine && mine.label) || (theirs && theirs.label) || (baseNode && baseNode.label) || "";
+    const out = mergeFields(baseNode, mine, theirs, name, conflicts);
+    if ((mine && mine.history) || (theirs && theirs.history)) {
+      out.history = mergeHistory(baseNode && baseNode.history, mine && mine.history, theirs && theirs.history);
+    }
+    const anyKids = (mine && mine.children) || (theirs && theirs.children) || (baseNode && baseNode.children);
+    if (!anyKids) return out;
+
+    const bK = {}, mK = {}, tK = {};
+    ((baseNode && baseNode.children) || []).forEach(c => { bK[c.id] = c; });
+    ((mine && mine.children) || []).forEach(c => { mK[c.id] = c; });
+    ((theirs && theirs.children) || []).forEach(c => { tK[c.id] = c; });
+
+    /* Order follows this device, with anything only the other side has appended after. Position is
+       not worth a conflict prompt, and a board that silently reshuffles is worse than one that does
+       not move at all. */
+    const order = [];
+    ((mine && mine.children) || []).forEach(c => order.push(c.id));
+    ((theirs && theirs.children) || []).forEach(c => { if (order.indexOf(c.id) === -1) order.push(c.id); });
+
+    const kids = [];
+    order.forEach(id => {
+      const b = bK[id], m = mK[id], t = tK[id];
+      if (m && t) { kids.push(mergeNode(b, m, t, conflicts)); return; }
+      if (m && !t) {
+        if (b) return;               // in the base and gone there: a real delete, so honour it
+        kids.push(clone(m)); return; // absent from the base: added here
+      }
+      if (!m && t) {
+        if (b) return;               // deleted here
+        kids.push(clone(t)); return; // added there
+      }
+    });
+    out.children = kids;
+    return out;
+  }
+  /* Returns the merged board plus the things that genuinely clashed. An empty list means it merged
+     cleanly and nobody needs to be asked anything at all. */
+  function mergeBoards(base, mine, theirs) {
+    const conflicts = [];
+    const merged = mergeNode(base, mine, theirs, conflicts);
+    return { tree: merged, conflicts: conflicts };
+  }
+  /* What changed on each side, for showing someone before they choose. Grouped the way it gets
+     read: what only this side has, what only the other has, and what both moved. */
+  function boardDiff(base, mine, theirs) {
+    const bI = indexById(base), mI = indexById(mine), tI = indexById(theirs);
+    const onlyMine = [], onlyTheirs = [], bothChanged = [];
+    const ids = {};
+    [mI, tI].forEach(ix => Object.keys(ix).forEach(id => { ids[id] = 1; }));
+    Object.keys(ids).forEach(id => {
+      if (id === "root") return;
+      const b = bI[id], m = mI[id], t = tI[id];
+      const label = (m && m.label) || (t && t.label) || "";
+      if (m && !t) { onlyMine.push({ id: id, name: label, what: b ? "deleted there" : "added here" }); return; }
+      if (!m && t) { onlyTheirs.push({ id: id, name: label, what: b ? "deleted here" : "added there" }); return; }
+      const fields = [];
+      const keys = {};
+      [b || {}, m, t].forEach(o => Object.keys(o).forEach(k => { keys[k] = 1; }));
+      Object.keys(keys).forEach(k => {
+        if (MERGE_SKIP[k]) return;
+        const mC = !sameValue(m[k], b ? b[k] : undefined), tC = !sameValue(t[k], b ? b[k] : undefined);
+        if (mC && tC && !sameValue(m[k], t[k])) fields.push(k);
+        else if (mC) onlyMine.push({ id: id, name: label, what: k + " changed here" });
+        else if (tC) onlyTheirs.push({ id: id, name: label, what: k + " changed there" });
+      });
+      if (fields.length) bothChanged.push({ id: id, name: label, fields: fields });
+      const mh = ((m.history) || []).length, th = ((t.history) || []).length, bh = ((b && b.history) || []).length;
+      if (mh > bh) onlyMine.push({ id: id, name: label, what: "ticked here" });
+      if (th > bh) onlyTheirs.push({ id: id, name: label, what: "ticked there" });
+    });
+    return { onlyMine: onlyMine, onlyTheirs: onlyTheirs, bothChanged: bothChanged };
+  }
+
   let loadChanged = false;
 
   // Every pass that runs over a board on the way in, in one place, so the snapshots go through
@@ -2924,6 +3096,8 @@
   async function stashBroken(raw) { if (!raw) return; try { await STORE.set(BROKEN_KEY, raw); } catch (e) {} }
 
   async function load() {
+    // First, before any migration can call save and trip the guard above.
+    try { await loadSyncCfg(); } catch (e) { syncCfgLoaded = true; }
     let raw = null;
     try { const r = await STORE.get(KEY); raw = r && r.value ? r.value : null; } catch (e) { raw = null; }
     let note = "";
@@ -2944,6 +3118,18 @@
       save();
     }
     try { await loadSettings(); } catch (e) {}
+    /* The quiet catch-up. Only runs when this device has nothing the shared copy has not seen, so
+       opening the app can never throw away work you did here. Anything else waits for a tap. It is
+       deliberately not awaited: the board draws now, and the sync lands when it lands. */
+    if (syncReady() && !syncCfg.dirty) {
+      setTimeout(() => {
+        syncRun({}).then(r => {
+          if (!r) return;
+          if (r.status === "merged") { render(); showToast("Caught up with your other devices."); }
+          else if (r.status === "token") showToast("Sync token is not working. Check it in settings.");
+        }).catch(() => {});
+      }, 800);
+    }
     /* Drawing is guarded too. A board can be perfectly valid and still hit something the drawing
        code cannot handle, and the result looks identical from the outside: a dead screen. */
     try { render(); }
@@ -2957,7 +3143,188 @@
     }
     if (note) setTimeout(() => { try { showToast(note); } catch (e) {} }, 600);
   }
-  async function save() { warnNoStorage(); try { await STORE.set(KEY, JSON.stringify(tree)); } catch (e) {} }
+  async function save() { warnNoStorage(); try { await STORE.set(KEY, JSON.stringify(tree)); } catch (e) {} syncTouched(); }
+
+  /* ===== The shared copy, kept in a private repository =====
+     One file, orbit-board.json, in a private repo of your own. A secret Gist would have been less
+     work and was the first plan, but secret is not private: anyone holding the address can read it
+     with no login at all, and a board is a list of everything you are carrying. A private repo is
+     actually access controlled.
+
+     It also happens to fix the race. Every read hands back a sha for the version it saw, and a write
+     that quotes a stale one is refused rather than silently landing on top of another device's work.
+
+     The token lives in this browser's storage and never in the page, so the app repo being public
+     costs nothing. Everything here fails soft: offline, no token, a revoked token, and sync simply
+     stops while the app carries on, because the local board is still the real one. */
+  const SYNC_KEY = "lifeboard:sync";
+  const BOARD_FILE = "orbit-board.json";
+  const GH_API = "https://api.github.com";
+  let syncCfg = { token: "", repo: "", sha: "", lastSync: "", dirty: false };
+  let syncBusy = false;
+
+  /* Nothing may write this back before it has been read. Startup migrations call save, save marks
+     the device dirty, and dirty writes the config: do that before the real one has loaded and the
+     token is overwritten with an empty one. So writes are held until the read has happened. */
+  let syncCfgLoaded = false;
+  async function loadSyncCfg() {
+    try { const r = await STORE.get(SYNC_KEY); if (r && r.value) Object.assign(syncCfg, JSON.parse(r.value)); } catch (e) {}
+    syncCfgLoaded = true;
+  }
+  async function saveSyncCfg() {
+    if (!syncCfgLoaded) return;
+    try { await STORE.set(SYNC_KEY, JSON.stringify(syncCfg)); } catch (e) {}
+  }
+  // Marks this device as holding something the shared copy has not seen. Cleared by a successful push.
+  function syncTouched() { if (!syncCfg.dirty) { syncCfg.dirty = true; saveSyncCfg(); } }
+  function syncReady() { return !!(syncCfg.token && syncCfg.repo); }
+
+  async function readBase() {
+    try { const r = await STORE.get(BASE_KEY); return r && r.value ? JSON.parse(r.value) : null; } catch (e) { return null; }
+  }
+  async function writeBase(t) { try { await STORE.set(BASE_KEY, JSON.stringify(t)); } catch (e) {} }
+
+  /* GitHub wants the file base64 encoded, and btoa only speaks bytes. A note with an accent or an
+     emoji in it would throw on the way out and come back mangled on the way in without this. */
+  function toB64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+  function fromB64(b64) {
+    const bin = atob(String(b64).replace(/\s/g, ""));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  }
+  async function ghCall(path, opts) {
+    const res = await fetch(GH_API + path, Object.assign({
+      headers: {
+        "Authorization": "Bearer " + syncCfg.token,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json"
+      }
+    }, opts || {}));
+    if (res.status === 401 || res.status === 403) throw new Error("token");
+    if (res.status === 404) throw new Error("missing");
+    if (res.status === 409 || res.status === 422) throw new Error("stale");
+    if (!res.ok) throw new Error("http " + res.status);
+    return res.json();
+  }
+  function boardPath() { return "/repos/" + syncCfg.repo + "/contents/" + BOARD_FILE; }
+
+  /* Returns the board and the sha of the version it came from, or null when the file is not there
+     yet. Anything past a megabyte comes back with the content left out, so it gets fetched again
+     from the address GitHub gives instead. Missing that would sync half a board and say nothing. */
+  async function boardRead() {
+    let meta;
+    try { meta = await ghCall(boardPath()); }
+    catch (e) { if (e.message === "missing") return null; throw e; }
+    let text = "";
+    if (meta.content) text = fromB64(meta.content);
+    else if (meta.download_url) {
+      const raw = await fetch(meta.download_url, { headers: { "Authorization": "Bearer " + syncCfg.token } });
+      if (!raw.ok) throw new Error("http " + raw.status);
+      text = await raw.text();
+    }
+    if (!text) return null;
+    let t;
+    try { t = JSON.parse(text); } catch (e) { throw new Error("unreadable"); }
+    return { tree: t, sha: meta.sha };
+  }
+  // The sha is the whole safety mechanism: quoting the version this device last saw means a write
+  // lands only if nobody else has written since. Otherwise GitHub refuses and the run starts over.
+  async function boardWrite(t, sha) {
+    const body = { message: "Orbit board " + TODAY, content: toB64(JSON.stringify(t)) };
+    if (sha) body.sha = sha;
+    const r = await ghCall(boardPath(), { method: "PUT", body: JSON.stringify(body) });
+    return r && r.content ? r.content.sha : "";
+  }
+
+  /* One run of the whole thing. Reads the shared copy, merges it against this board with the copy
+     from the last sync as the referee, and writes the result back if anything moved.
+
+     Returns what happened rather than acting on it, so the caller decides how much noise to make.
+     A quiet catch-up on opening the app and a deliberate button press want the same work and very
+     different amounts of talking. */
+  async function syncRun(opts) {
+    opts = opts || {};
+    if (!syncReady()) return { status: "off" };
+    if (syncBusy) return { status: "busy" };
+    syncBusy = true;
+    try {
+      const base = await readBase();
+      const mine = clone(tree);
+      let remote = null;
+      try { remote = await boardRead(); }
+      catch (e) {
+        syncBusy = false;
+        return { status: e.message === "token" ? "token" : e.message === "unreadable" ? "unreadable" : "offline" };
+      }
+      // Nothing there yet, so this device seeds it rather than merging against emptiness.
+      if (!remote) {
+        const sha = await boardWrite(mine, "");
+        await writeBase(mine);
+        syncCfg.sha = sha; syncCfg.dirty = false; syncCfg.lastSync = new Date().toISOString(); await saveSyncCfg();
+        syncBusy = false;
+        return { status: "pushed", first: true };
+      }
+      const theirs = remote.tree;
+      const diff = boardDiff(base, mine, theirs);
+      const merged = mergeBoards(base, mine, theirs);
+      /* A clash stops here and changes nothing at all. The merged board and the sha it was built
+         against are handed back so an answer can be applied later without reading again. */
+      if (merged.conflicts.length && !opts.resolve) {
+        syncBusy = false;
+        return { status: "conflict", conflicts: merged.conflicts, diff: diff, merged: merged.tree, sha: remote.sha };
+      }
+      // A snapshot of what was here before the merge lands, so a bad merge stays recoverable.
+      try { await keepSnapshot(JSON.stringify(mine)); } catch (e) {}
+      let sha;
+      try { sha = await boardWrite(merged.tree, remote.sha); }
+      catch (e) {
+        syncBusy = false;
+        /* Refused because another device wrote while this one was thinking. Nothing local has
+           changed yet, so the honest move is to start over rather than force anything through. */
+        if (e.message === "stale") return { status: "retry" };
+        return { status: e.message === "token" ? "token" : "offline" };
+      }
+      tree = merged.tree;
+      await STORE.set(KEY, JSON.stringify(tree));
+      await writeBase(clone(tree));
+      syncCfg.sha = sha; syncCfg.dirty = false; syncCfg.lastSync = new Date().toISOString(); await saveSyncCfg();
+      syncBusy = false;
+      const moved = diff.onlyMine.length + diff.onlyTheirs.length;
+      return { status: moved ? "merged" : "same", diff: diff, moved: moved };
+    } catch (e) {
+      syncBusy = false;
+      return { status: e && e.message === "token" ? "token" : "offline" };
+    }
+  }
+  /* Applies an answer to a clash. "mine" and "theirs" pick a whole side for the fields that
+     actually clashed; everything that merged cleanly stays merged either way, so choosing a side
+     never costs you the other device's unrelated work. */
+  async function syncResolve(choice, pending) {
+    if (!pending) return { status: "off" };
+    let t = pending.merged;
+    if (choice === "theirs") {
+      pending.conflicts.forEach(c => {
+        const n = indexById(t)[c.id];
+        if (!n) return;
+        if (c.theirs === undefined) delete n[c.field]; else n[c.field] = c.theirs;
+      });
+    }
+    try { await keepSnapshot(JSON.stringify(tree)); } catch (e) {}
+    let sha;
+    try { sha = await boardWrite(t, pending.sha); }
+    catch (e) { return { status: e && e.message === "stale" ? "retry" : "offline" }; }
+    tree = t;
+    await STORE.set(KEY, JSON.stringify(tree));
+    await writeBase(clone(tree));
+    syncCfg.sha = sha; syncCfg.dirty = false; syncCfg.lastSync = new Date().toISOString(); await saveSyncCfg();
+    return { status: "merged" };
+  }
   async function loadSettings() {
     try {
       const r = await STORE.get(SETTINGS_KEY);
@@ -3538,6 +3905,7 @@
     if (document.body.classList.contains("tabs")) renderToday();
     const center = findNode(path[path.length - 1]);
     renderCrumbs(); renderDailies(center); refreshTools(); renderSidePanel();
+    try { drawSyncStamp(); } catch (e) {}
     document.body.dataset.mood = stateOf(tree);
     document.getElementById("editCurrent").hidden = !(path.length > 1 && isContainer(center));
     const cam = document.getElementById("camera"); cam.style.transition = "none"; cam.style.transform = "none";
@@ -6604,6 +6972,9 @@
     { label: () => "Spark's connection: " + aiLabel(), icon: () => IC.spark,
       on: () => aiReady(), act: () => { closeMobMenu(); openAiPanel(); } },
     { sep: true },
+    { label: () => syncReady() ? "Sync: on" : "Sync: off", icon: () => IC.exp,
+      on: () => syncReady(), act: () => { closeMobMenu(); openSyncSheet(); } },
+    { sep: true },
     { label: "Save a backup", icon: () => IC.exp, on: () => true, act: () => document.getElementById("exportBtn").click() },
     { label: "Paste in new tasks", icon: () => IC.imp, on: () => true, act: () => document.getElementById("importBtn").click() }
   ];
@@ -6642,6 +7013,145 @@
     v.className = "mmVer";
     v.textContent = "Orbit v" + APP_VERSION;
     m.appendChild(v);
+  }
+  /* ===== Sync, on screen =====
+     Two states in one panel: before you have connected, and after. Nothing here is clever. The
+     token is write only, because showing it back serves nobody and leaks it to anyone glancing at
+     the screen. Replacing it means typing a new one. */
+  function fmtStamp(iso) {
+    if (!iso) return "never";
+    const d = new Date(iso);
+    if (isNaN(d)) return "never";
+    const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    let h = d.getHours(), ap = h >= 12 ? "pm" : "am";
+    h = h % 12; if (h === 0) h = 12;
+    return MON[d.getMonth()] + " " + d.getDate() + ", " + h + ":" + String(d.getMinutes()).padStart(2, "0") + " " + ap;
+  }
+  // The stamp answers one question: is what I am looking at current. So unsent changes and a failed
+  // attempt both say so, rather than showing an old time that reads like it is up to date.
+  function drawSyncStamp() {
+    const el = document.getElementById("syncStamp");
+    if (!el) return;
+    if (!syncReady()) { el.hidden = true; return; }
+    el.hidden = false;
+    // "never \u00b7 unsent" is technically true and reads like nonsense, so a device that has not
+    // synced yet says so plainly instead of pairing a missing date with a state.
+    let text, warn = false;
+    if (!syncCfg.lastSync) { text = "Not synced yet"; warn = true; }
+    else if (syncOffline) { text = fmtStamp(syncCfg.lastSync) + " \u00b7 offline"; warn = true; }
+    else if (syncCfg.dirty) { text = fmtStamp(syncCfg.lastSync) + " \u00b7 unsent"; warn = true; }
+    else text = "Synced " + fmtStamp(syncCfg.lastSync);
+    el.textContent = text;
+    el.classList.toggle("warn", warn);
+  }
+  let syncOffline = false;
+  let syncPending = null; // a clash waiting for an answer
+
+  function syncMsg(text, kind) {
+    const m = document.getElementById("syncMsg");
+    if (!m) return;
+    m.textContent = text || "";
+    m.className = "msg" + (kind ? " " + kind : "");
+  }
+  function drawSyncSheet() {
+    const el = document.getElementById("syncSheet");
+    if (!el) return;
+    if (syncReady()) {
+      el.innerHTML = '<h3>Sync</h3>'
+        + '<p class="sub">' + esc(syncCfg.repo) + '</p>'
+        + '<div class="rows">'
+        + '<div><span class="k">Last synced</span><span>' + esc(fmtStamp(syncCfg.lastSync)) + '</span></div>'
+        + '<div><span class="k">This device</span><span>' + (syncCfg.dirty ? "has unsent changes" : "up to date") + '</span></div>'
+        + '</div>'
+        + '<div class="acts"><button id="syncNowBtn">Sync now</button>'
+        + '<button id="syncOffBtn" class="danger">Disconnect</button>'
+        + '<button id="syncCloseBtn">Close</button></div>'
+        + '<p class="msg" id="syncMsg"></p>';
+      document.getElementById("syncNowBtn").onclick = async () => {
+        syncMsg("Syncing...");
+        const r = await syncRun({});
+        handleSyncResult(r, true);
+      };
+      document.getElementById("syncOffBtn").onclick = async () => {
+        // Clears the credentials only. The board on this device and the shared copy are untouched.
+        syncCfg.token = ""; syncCfg.repo = ""; syncCfg.sha = ""; syncCfg.dirty = false;
+        await saveSyncCfg();
+        drawSyncSheet(); drawSyncStamp();
+      };
+    } else {
+      el.innerHTML = '<h3>Sync</h3>'
+        + '<p class="sub">Share one board across your devices. Off until you connect.</p>'
+        + '<label>Repository</label><input type="text" id="syncRepo" placeholder="yourname/orbit-sync" autocomplete="off" spellcheck="false" />'
+        + '<label>Token</label><input type="password" id="syncTok" autocomplete="off" spellcheck="false" />'
+        + '<p class="hint">Stays on this device. Never leaves it.</p>'
+        + '<div class="acts"><button id="syncGoBtn">Connect</button><button id="syncCloseBtn">Close</button></div>'
+        + '<p class="msg" id="syncMsg"></p>'
+        + '<p class="steps" id="syncHelp"><b>Where do I get a token?</b></p>';
+      document.getElementById("syncHelp").onclick = () => {
+        document.getElementById("syncHelp").innerHTML =
+          '<b>On github.com</b><br />'
+          + '1. Make a private repository, any name.<br />'
+          + '2. Profile picture, Settings, Developer settings.<br />'
+          + '3. Personal access tokens, Fine-grained tokens.<br />'
+          + '4. Generate new token. Name it anything.<br />'
+          + '5. Repository access: Only select repositories, pick yours.<br />'
+          + '6. Repository permissions: set Contents to Read and write.<br />'
+          + '7. Generate token, then copy it. It is shown once.<br />'
+          + 'Repository above is written owner slash name.';
+      };
+      // Connecting runs a real sync rather than just saving the fields, so a wrong token or a
+      // misspelled repository is found now instead of a day from now.
+      document.getElementById("syncGoBtn").onclick = async () => {
+        const repo = (document.getElementById("syncRepo").value || "").trim().replace(/^\/+|\/+$/g, "");
+        const tok = (document.getElementById("syncTok").value || "").trim();
+        if (!repo || repo.indexOf("/") === -1) { syncMsg("Repository should look like yourname/orbit-sync.", "bad"); return; }
+        if (!tok) { syncMsg("Paste the token.", "bad"); return; }
+        syncMsg("Checking...");
+        syncCfg.repo = repo; syncCfg.token = tok; syncCfg.sha = "";
+        const r = await syncRun({});
+        if (r.status === "token" || r.status === "offline" || r.status === "unreadable") {
+          syncCfg.repo = ""; syncCfg.token = "";  // do not keep credentials that did not work
+          handleSyncResult(r, true);
+          return;
+        }
+        await saveSyncCfg();
+        drawSyncSheet(); drawSyncStamp();
+        syncMsg("Connected.", "good");
+      };
+    }
+    const close = document.getElementById("syncCloseBtn");
+    if (close) close.onclick = closeSyncSheet;
+  }
+  function openSyncSheet() {
+    document.getElementById("syncScrim").hidden = false;
+    document.getElementById("syncSheet").hidden = false;
+    drawSyncSheet();
+  }
+  function closeSyncSheet() {
+    document.getElementById("syncScrim").hidden = true;
+    document.getElementById("syncSheet").hidden = true;
+  }
+  document.getElementById("syncScrim").onclick = closeSyncSheet;
+  document.getElementById("syncStamp").onclick = async () => {
+    if (!syncReady()) return;
+    const r = await syncRun({});
+    handleSyncResult(r, false);
+  };
+  /* One place that turns a sync result into something a person sees, so the button and the quiet
+     catch-up on opening cannot drift apart in what they say. */
+  function handleSyncResult(r, inSheet) {
+    if (!r) return;
+    syncOffline = (r.status === "offline");
+    const say = (t, kind) => { if (inSheet) syncMsg(t, kind); else showToast(t); };
+    if (r.status === "merged") { render(); drawSyncStamp(); say("Up to date.", "good"); }
+    else if (r.status === "same" || r.status === "pushed") { drawSyncStamp(); say("Up to date.", "good"); }
+    else if (r.status === "retry") { say("Another device was writing. Try again."); }
+    else if (r.status === "token") { say("That token did not work. Check it has Contents read and write on that repository.", "bad"); }
+    else if (r.status === "offline") { drawSyncStamp(); say("Could not reach GitHub. Your board is fine.", "bad"); }
+    else if (r.status === "unreadable") { say("The shared copy is not readable. Nothing was changed.", "bad"); }
+    else if (r.status === "conflict") { syncPending = r; say("Both devices changed the same thing. Conflict screen is not built yet."); }
+    if (inSheet && syncReady()) drawSyncSheet();
+    drawSyncStamp();
   }
   function closeMobMenu() {
     document.getElementById("mobMenu").hidden = true;
