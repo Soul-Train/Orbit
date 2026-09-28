@@ -3126,7 +3126,7 @@
         syncRun({}).then(r => {
           if (!r) return;
           if (r.status === "merged") { render(); showToast("Caught up with your other devices."); }
-          else if (r.status === "token") showToast("Sync token is not working. Check it in settings.");
+          else if (["token", "perm", "norepo"].indexOf(r.status) !== -1) showToast("Sync is not connecting. Tap the sync stamp for details.");
         }).catch(() => {});
       }, 800);
     }
@@ -3160,6 +3160,7 @@
   const SYNC_KEY = "lifeboard:sync";
   const BOARD_FILE = "orbit-board.json";
   const GH_API = "https://api.github.com";
+  const SYNC_REPO_DEFAULT = "Soul-Train/Orbit-sync";
   let syncCfg = { token: "", repo: "", sha: "", lastSync: "", dirty: false };
   let syncBusy = false;
 
@@ -3198,19 +3199,33 @@
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return new TextDecoder().decode(bytes);
   }
+  /* Each way GitHub can say no gets its own name, and carries the code with it, so the sync sheet
+     can say which one happened. Folding them together is what made "token failures" unsolvable:
+     a token that cannot see a private repo gets 404, not 403, and that read as "offline". */
+  function ghErr(name, code) { const e = new Error(name); e.code = code; return e; }
   async function ghCall(path, opts) {
-    const res = await fetch(GH_API + path, Object.assign({
+    let res;
+    try { res = await fetch(GH_API + path, Object.assign({
       headers: {
         "Authorization": "Bearer " + syncCfg.token,
         "Accept": "application/vnd.github+json",
         "Content-Type": "application/json"
       }
-    }, opts || {}));
-    if (res.status === 401 || res.status === 403) throw new Error("token");
-    if (res.status === 404) throw new Error("missing");
-    if (res.status === 409 || res.status === 422) throw new Error("stale");
-    if (!res.ok) throw new Error("http " + res.status);
+    }, opts || {})); }
+    catch (e) { throw ghErr("offline", 0); }
+    if (res.status === 401) throw ghErr("token", 401);
+    if (res.status === 403) throw ghErr("perm", 403);
+    if (res.status === 404) throw ghErr("missing", 404);
+    if (res.status === 409 || res.status === 422) throw ghErr("stale", res.status);
+    if (!res.ok) throw ghErr("http", res.status);
     return res.json();
+  }
+  // Turns a thrown error into the status the sync sheet talks about. A 404 only reaches here after
+  // a read already came back empty, so it means the repository itself is not visible to the token.
+  function syncErr(e) {
+    const m = e && e.message;
+    const map = { token: "token", perm: "perm", missing: "norepo", stale: "retry", unreadable: "unreadable", http: "http" };
+    return { status: map[m] || "offline", code: (e && e.code) || 0 };
   }
   function boardPath() { return "/repos/" + syncCfg.repo + "/contents/" + BOARD_FILE; }
 
@@ -3220,12 +3235,12 @@
   async function boardRead() {
     let meta;
     try { meta = await ghCall(boardPath()); }
-    catch (e) { if (e.message === "missing") return null; throw e; }
+    catch (e) { if (e.message === "missing" || (e.message === "stale" && e.code === 409)) return null; throw e; }
     let text = "";
     if (meta.content) text = fromB64(meta.content);
     else if (meta.download_url) {
       const raw = await fetch(meta.download_url, { headers: { "Authorization": "Bearer " + syncCfg.token } });
-      if (!raw.ok) throw new Error("http " + raw.status);
+      if (!raw.ok) throw ghErr("http", raw.status);
       text = await raw.text();
     }
     if (!text) return null;
@@ -3260,7 +3275,7 @@
       try { remote = await boardRead(); }
       catch (e) {
         syncBusy = false;
-        return { status: e.message === "token" ? "token" : e.message === "unreadable" ? "unreadable" : "offline" };
+        return syncErr(e);
       }
       // Nothing there yet, so this device seeds it rather than merging against emptiness.
       if (!remote) {
@@ -3287,8 +3302,7 @@
         syncBusy = false;
         /* Refused because another device wrote while this one was thinking. Nothing local has
            changed yet, so the honest move is to start over rather than force anything through. */
-        if (e.message === "stale") return { status: "retry" };
-        return { status: e.message === "token" ? "token" : "offline" };
+        return syncErr(e);
       }
       tree = merged.tree;
       await STORE.set(KEY, JSON.stringify(tree));
@@ -3299,7 +3313,7 @@
       return { status: moved ? "merged" : "same", diff: diff, moved: moved };
     } catch (e) {
       syncBusy = false;
-      return { status: e && e.message === "token" ? "token" : "offline" };
+      return syncErr(e);
     }
   }
   /* Applies an answer to a clash. "mine" and "theirs" pick a whole side for the fields that
@@ -3318,7 +3332,7 @@
     try { await keepSnapshot(JSON.stringify(tree)); } catch (e) {}
     let sha;
     try { sha = await boardWrite(t, pending.sha); }
-    catch (e) { return { status: e && e.message === "stale" ? "retry" : "offline" }; }
+    catch (e) { return syncErr(e); }
     tree = t;
     await STORE.set(KEY, JSON.stringify(tree));
     await writeBase(clone(tree));
@@ -7032,8 +7046,14 @@
   function drawSyncStamp() {
     const el = document.getElementById("syncStamp");
     if (!el) return;
-    if (!syncReady()) { el.hidden = true; return; }
     el.hidden = false;
+    /* This is the only way in on a wide screen, because the menu holding the sync row is phone
+       only. Hiding it when sync is off left the desktop with no entry point at all. */
+    if (!syncReady()) {
+      el.textContent = "Set up sync";
+      el.classList.remove("warn");
+      return;
+    }
     // "never \u00b7 unsent" is technically true and reads like nonsense, so a device that has not
     // synced yet says so plainly instead of pairing a missing date with a state.
     let text, warn = false;
@@ -7081,7 +7101,7 @@
     } else {
       el.innerHTML = '<h3>Sync</h3>'
         + '<p class="sub">Share one board across your devices. Off until you connect.</p>'
-        + '<label>Repository</label><input type="text" id="syncRepo" placeholder="yourname/orbit-sync" autocomplete="off" spellcheck="false" />'
+        + '<label>Repository</label><input type="text" id="syncRepo" value="' + esc(syncCfg.repo || SYNC_REPO_DEFAULT) + '" autocomplete="off" spellcheck="false" />'
         + '<label>Token</label><input type="password" id="syncTok" autocomplete="off" spellcheck="false" />'
         + '<p class="hint">Stays on this device. Never leaves it.</p>'
         + '<div class="acts"><button id="syncGoBtn">Connect</button><button id="syncCloseBtn">Close</button></div>'
@@ -7102,14 +7122,17 @@
       // Connecting runs a real sync rather than just saving the fields, so a wrong token or a
       // misspelled repository is found now instead of a day from now.
       document.getElementById("syncGoBtn").onclick = async () => {
-        const repo = (document.getElementById("syncRepo").value || "").trim().replace(/^\/+|\/+$/g, "");
+        const repo = (document.getElementById("syncRepo").value || "").trim()
+          .replace(/^(https?:\/\/)?(www\.)?github\.com\//i, "").replace(/\.git$/i, "")
+          .replace(/^\/+|\/+$/g, "").split("/").slice(0, 2).join("/");
         const tok = (document.getElementById("syncTok").value || "").trim();
         if (!repo || repo.indexOf("/") === -1) { syncMsg("Repository should look like yourname/orbit-sync.", "bad"); return; }
         if (!tok) { syncMsg("Paste the token.", "bad"); return; }
+        document.getElementById("syncRepo").value = repo;
         syncMsg("Checking...");
         syncCfg.repo = repo; syncCfg.token = tok; syncCfg.sha = "";
         const r = await syncRun({});
-        if (r.status === "token" || r.status === "offline" || r.status === "unreadable") {
+        if (["pushed", "same", "merged", "conflict", "retry"].indexOf(r.status) === -1) {
           syncCfg.repo = ""; syncCfg.token = "";  // do not keep credentials that did not work
           handleSyncResult(r, true);
           return;
@@ -7133,12 +7156,17 @@
   }
   document.getElementById("syncScrim").onclick = closeSyncSheet;
   document.getElementById("syncStamp").onclick = async () => {
-    if (!syncReady()) return;
+    if (!syncReady()) { openSyncSheet(); return; }
     const r = await syncRun({});
     handleSyncResult(r, false);
   };
   /* One place that turns a sync result into something a person sees, so the button and the quiet
      catch-up on opening cannot drift apart in what they say. */
+  // The Connect handler clears the repo on failure before this runs, so read it off the field.
+  function syncCfgRepoShown() {
+    const f = document.getElementById("syncRepo");
+    return (syncCfg.repo || (f && f.value) || SYNC_REPO_DEFAULT).trim();
+  }
   function handleSyncResult(r, inSheet) {
     if (!r) return;
     syncOffline = (r.status === "offline");
@@ -7146,7 +7174,10 @@
     if (r.status === "merged") { render(); drawSyncStamp(); say("Up to date.", "good"); }
     else if (r.status === "same" || r.status === "pushed") { drawSyncStamp(); say("Up to date.", "good"); }
     else if (r.status === "retry") { say("Another device was writing. Try again."); }
-    else if (r.status === "token") { say("That token did not work. Check it has Contents read and write on that repository.", "bad"); }
+    else if (r.status === "token") { say("GitHub rejected the token. It may be mistyped, expired or deleted. (401)", "bad"); }
+    else if (r.status === "perm") { say("The token can see " + syncCfgRepoShown() + " but cannot write. Set Contents to Read and write. (403)", "bad"); }
+    else if (r.status === "norepo") { say("The token cannot see " + syncCfgRepoShown() + ". Check the repository name, and that the token has it selected. (404)", "bad"); }
+    else if (r.status === "http") { say("GitHub answered with an error. (" + r.code + ")", "bad"); }
     else if (r.status === "offline") { drawSyncStamp(); say("Could not reach GitHub. Your board is fine.", "bad"); }
     else if (r.status === "unreadable") { say("The shared copy is not readable. Nothing was changed.", "bad"); }
     else if (r.status === "conflict") { syncPending = r; say("Both devices changed the same thing. Conflict screen is not built yet."); }
