@@ -646,6 +646,16 @@
   .syncSheet .msg.good { color: var(--calm); }
   .syncSheet .steps { font-size: 12px; color: var(--muted); line-height: 1.65; margin: 10px 0 0; }
   .syncSheet .steps b { color: var(--ink); font-weight: 600; }
+  .syncSheet .buckets { display: grid; gap: 8px; margin: 0 0 14px; }
+  .syncSheet .bucket { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+  .syncSheet .bucket.hot { border-color: rgba(233,105,78,.45); }
+  .syncSheet .bucket .bh { display: flex; justify-content: space-between; color: var(--ink); }
+  .syncSheet .bucket .n { color: var(--muted); }
+  .syncSheet .bucket.hot .n { color: var(--hot); }
+  .syncSheet .bucket ul { margin: 6px 0 0; padding: 0 0 0 16px; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+  .syncSheet .bucket em { font-style: normal; opacity: .7; }
+  .syncSheet .bucket li.more { list-style: none; margin-left: -16px; opacity: .7; }
+  .syncSheet .hint2 { font-size: 11.5px; color: var(--muted); margin: -4px 0 14px; line-height: 1.5; }
   .tdOpt.center { justify-content: center; }
   /* The number field defaults to full width like every other input in this panel, which would push
      the unit buttons onto their own line and break the sentence the row is trying to read as. */
@@ -3126,6 +3136,7 @@
         syncRun({}).then(r => {
           if (!r) return;
           if (r.status === "merged") { render(); showToast("Caught up with your other devices."); }
+          else if (r.status === "conflict") { syncPending = r; drawSyncStamp(); }
           else if (["token", "perm", "norepo"].indexOf(r.status) !== -1) showToast("Sync is not connecting. Tap the sync stamp for details.");
         }).catch(() => {});
       }, 800);
@@ -3292,7 +3303,8 @@
          against are handed back so an answer can be applied later without reading again. */
       if (merged.conflicts.length && !opts.resolve) {
         syncBusy = false;
-        return { status: "conflict", conflicts: merged.conflicts, diff: diff, merged: merged.tree, sha: remote.sha };
+        return { status: "conflict", conflicts: merged.conflicts, diff: diff, merged: merged.tree, sha: remote.sha,
+                 first: !base, theirs: theirs };
       }
       // A snapshot of what was here before the merge lands, so a bad merge stays recoverable.
       try { await keepSnapshot(JSON.stringify(mine)); } catch (e) {}
@@ -3322,7 +3334,10 @@
   async function syncResolve(choice, pending) {
     if (!pending) return { status: "off" };
     let t = pending.merged;
-    if (choice === "theirs") {
+    /* First join: the two boards have never been matched, so "changed in both" is every difference
+       and a field by field merge would stitch two unrelated boards together. A side wins whole. */
+    if (pending.first) t = clone(choice === "theirs" ? pending.theirs : tree);
+    else if (choice === "theirs") {
       pending.conflicts.forEach(c => {
         const n = indexById(t)[c.id];
         if (!n) return;
@@ -7057,7 +7072,8 @@
     // "never \u00b7 unsent" is technically true and reads like nonsense, so a device that has not
     // synced yet says so plainly instead of pairing a missing date with a state.
     let text, warn = false;
-    if (!syncCfg.lastSync) { text = "Not synced yet"; warn = true; }
+    if (syncPending) { text = "Sync needs a choice"; warn = true; }
+    else if (!syncCfg.lastSync) { text = "Not synced yet"; warn = true; }
     else if (syncOffline) { text = fmtStamp(syncCfg.lastSync) + " \u00b7 offline"; warn = true; }
     else if (syncCfg.dirty) { text = fmtStamp(syncCfg.lastSync) + " \u00b7 unsent"; warn = true; }
     else text = "Synced " + fmtStamp(syncCfg.lastSync);
@@ -7073,9 +7089,61 @@
     m.textContent = text || "";
     m.className = "msg" + (kind ? " " + kind : "");
   }
+  /* The three buckets, then the answer. Only "changed in both" needs deciding; the other two are
+     shown so the choice is made knowing what already merged. On a first join the lists would be
+     the whole board twice, so it shows counts and the buttons pick a whole board. */
+  function syncBucket(title, items, fmt) {
+    const shown = items.slice(0, 5).map(i => '<li>' + fmt(i) + '</li>').join("");
+    const more = items.length > 5 ? '<li class="more">and ' + (items.length - 5) + ' more</li>' : "";
+    return '<div class="bucket"><div class="bh"><span>' + title + '</span><span class="n">' + items.length + '</span></div>'
+      + (items.length ? '<ul>' + shown + more + '</ul>' : '') + '</div>';
+  }
+  function drawSyncChoice(el) {
+    const p = syncPending, d = p.diff || { onlyMine: [], onlyTheirs: [], bothChanged: [] };
+    const nm = i => esc(i.name || "Untitled");
+    let body;
+    if (p.first) {
+      body = '<h3>First sync on this device</h3>'
+        + '<p class="sub">This board and the shared copy have never been matched. Pick one to keep whole.</p>'
+        + '<div class="buckets">'
+        + '<div class="bucket"><div class="bh"><span>Only here</span><span class="n">' + d.onlyMine.length + '</span></div></div>'
+        + '<div class="bucket"><div class="bh"><span>Only in shared copy</span><span class="n">' + d.onlyTheirs.length + '</span></div></div>'
+        + '<div class="bucket hot"><div class="bh"><span>Different in both</span><span class="n">' + d.bothChanged.length + '</span></div></div>'
+        + '</div>'
+        + '<p class="hint2">Nothing is lost. This device keeps a snapshot, and GitHub keeps every old shared copy.</p>';
+    } else {
+      body = '<h3>Sync needs a choice</h3>'
+        + '<p class="sub">Both devices changed the same thing. Everything else merges either way.</p>'
+        + '<div class="buckets">'
+        + syncBucket("Only here", d.onlyMine, i => nm(i) + ' <em>' + esc(i.what) + '</em>')
+        + syncBucket("Only there", d.onlyTheirs, i => nm(i) + ' <em>' + esc(i.what) + '</em>')
+        + syncBucket("Changed in both", d.bothChanged, i => nm(i) + ' <em>' + esc(i.fields.join(", ")) + '</em>').replace('class="bucket"', 'class="bucket hot"')
+        + '</div>';
+    }
+    el.innerHTML = body
+      + '<div class="acts"><button id="syncMineBtn">Keep this device</button>'
+      + '<button id="syncTheirsBtn">Take the shared copy</button>'
+      + '<button id="syncLaterBtn">Not now</button></div>'
+      + '<p class="msg" id="syncMsg"></p>';
+    const answer = async choice => {
+      syncMsg("Syncing...");
+      /* Read again right before answering. The clash on screen may be minutes old, and answering
+         a stale one would drop whatever changed here in the meantime. */
+      const fresh = await syncRun({});
+      if (fresh.status !== "conflict") { syncPending = null; handleSyncResult(fresh, true); return; }
+      const r = await syncResolve(choice, fresh);
+      if (r.status === "merged") { syncPending = null; render(); drawSyncSheet(); drawSyncStamp(); syncMsg("Up to date.", "good"); return; }
+      syncPending = fresh;
+      handleSyncResult(r, true);
+    };
+    document.getElementById("syncMineBtn").onclick = () => answer("mine");
+    document.getElementById("syncTheirsBtn").onclick = () => answer("theirs");
+    document.getElementById("syncLaterBtn").onclick = closeSyncSheet;
+  }
   function drawSyncSheet() {
     const el = document.getElementById("syncSheet");
     if (!el) return;
+    if (syncReady() && syncPending) { drawSyncChoice(el); return; }
     if (syncReady()) {
       el.innerHTML = '<h3>Sync</h3>'
         + '<p class="sub">' + esc(syncCfg.repo) + '</p>'
@@ -7156,7 +7224,7 @@
   }
   document.getElementById("syncScrim").onclick = closeSyncSheet;
   document.getElementById("syncStamp").onclick = async () => {
-    if (!syncReady()) { openSyncSheet(); return; }
+    if (!syncReady() || syncPending) { openSyncSheet(); return; }
     const r = await syncRun({});
     handleSyncResult(r, false);
   };
@@ -7180,7 +7248,7 @@
     else if (r.status === "http") { say("GitHub answered with an error. (" + r.code + ")", "bad"); }
     else if (r.status === "offline") { drawSyncStamp(); say("Could not reach GitHub. Your board is fine.", "bad"); }
     else if (r.status === "unreadable") { say("The shared copy is not readable. Nothing was changed.", "bad"); }
-    else if (r.status === "conflict") { syncPending = r; say("Both devices changed the same thing. Conflict screen is not built yet."); }
+    else if (r.status === "conflict") { syncPending = r; if (!inSheet) openSyncSheet(); else drawSyncSheet(); }
     if (inSheet && syncReady()) drawSyncSheet();
     drawSyncStamp();
   }
