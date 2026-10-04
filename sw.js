@@ -1,7 +1,7 @@
 /* Version stamped. Changing this string is what makes a phone drop the old copy: the install and
    activate steps below key their cache off it, and anything not matching is deleted on activate.
    Without the stamp an installed app keeps serving whatever it cached first, forever. */
-const CACHE = "orbit-v0.7.9g";
+const CACHE = "orbit-v0.7.9h";
 const FILES = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {

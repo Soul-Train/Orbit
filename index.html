@@ -194,7 +194,7 @@
   /* Taller on a phone. The ring is an ellipse sized in percentages of the stage, so height was the
      binding axis: the top and bottom bubbles ran into the middle one long before the side ones ran
      out of room. 28px more height buys more than any amount of widening could. */
-  @media (max-width: 700px) { .stage { aspect-ratio: 5 / 4.35; } }
+  @media (max-width: 900px) { .stage { aspect-ratio: 5 / 4.35; } }
   .stage.listmode { aspect-ratio: auto; max-height: none; overflow: visible; }
   .stage.leafmode { aspect-ratio: 5 / 2.2; max-height: 34vh; }
   .camera { position: absolute; inset: 0; transform-origin: 50% 50%; will-change: transform; }
@@ -446,7 +446,7 @@
   body.movingNote .tdZone { display: block; }
   .tdZone.over { background: rgba(111,191,166,.14); border-color: var(--calm); }
   /* No room beside the board on a phone, so notes stack under it and moving is switched off. */
-  @media (max-width: 780px) {
+  @media (max-width: 900px) {
     #tdNotes { max-width: 400px; margin: 0 auto; }
     .tdNote { position: static; width: 100%; min-width: 0; margin: 8px auto 0; }
     .tdNoteGrip { display: none; }
@@ -1231,7 +1231,7 @@
      it was. Below it the chrome collapses so the board can have the height. */
   /* Phone-only chrome, hidden by default so desktop is untouched. */
   .mobileHead, .mobMenu, .deckChip { display: none; }
-  @media (max-width: 700px) {
+  @media (max-width: 900px) {
     /* The toolbar is hidden, but the search box lives inside it, and a child of a hidden parent
        cannot be shown. So the bar stays in the layout at zero height with only its icons hidden. */
     .topbar { display: block; height: 0; overflow: visible; margin: 0; padding: 0; position: relative; }
@@ -1494,7 +1494,7 @@
      Desktop is deliberately untouched. All of this lives inside the mobile media query. */
   .tabbar { display: none; }
   .capScreen, .todayScreen { display: none; }
-  @media (max-width: 700px) {
+  @media (max-width: 900px) {
     /* The tab bar owns the bottom of the screen, so the toast has to sit above it. Without this the
        breadcrumb rows land underneath it and cannot be tapped at all. */
     .toast { bottom: calc(98px + env(safe-area-inset-bottom, 0px)); }
@@ -1742,6 +1742,21 @@
       width: min(320px, 86vw); max-height: 70vh; overflow-y: auto; z-index: 20; }
   }
 
+
+  /* Lite mode. For old tablets: no motion, no glows, no gradients. Urgency colors and the thin ring
+     stay, so the board reads the same. Every transition and animation is off, which also makes
+     zooms instant. Nothing in the script waits on a transition ending, so nothing stalls. */
+  html.lite *, html.lite *::before, html.lite *::after { animation: none !important; transition: none !important; }
+  html.lite body { background: var(--ground) !important; }
+  html.lite .capScreen, html.lite .todayScreen { background: var(--ground) !important; }
+  html.lite .tabbtn.on::before { display: none; }
+  html.lite .bubble .inner { filter: none !important; }
+  html.lite .bubble.pulse .inner::after { display: none; }
+  html.lite .bubble.calm .inner { background: #2F584C; box-shadow: 0 0 0 1.5px rgba(111,191,166,.5); }
+  html.lite .bubble.warn .inner { background: #5F4A23; box-shadow: 0 0 0 1.5px rgba(231,178,76,.7); }
+  html.lite .bubble.urgent .inner { background: #5E2D22; box-shadow: 0 0 0 1.5px rgba(233,105,78,.8); }
+  html.lite .bubble.done .inner { background: #26312F; box-shadow: 0 0 0 1px rgba(143,166,165,.35); }
+  html.lite .bubble.trashed .inner { background: #2A201E; box-shadow: 0 0 0 1px rgba(233,105,78,.25); }
   @media (prefers-reduced-motion: reduce) { *, .bubble, .bubble .inner, .camera { animation: none !important; transition: none !important; } .bubble { opacity: 1 !important; } svg.links { opacity: 1 !important; } }
 </style>
 
@@ -2132,6 +2147,10 @@
      changelog rather than a claim about the app. Today is still a stub and the morning sheet has
      not shipped, so 0.7 is honest. Today earns 0.8, the rest of the backlog earns 0.9. */
   const KEY = "lifeboard:tree";
+  /* The one place the phone layout line lives in script. The stylesheet repeats the same number in
+     its media queries, which cannot read a variable, so change both together. 900 puts a tablet held
+     upright (about 800 wide) on the phone layout; sideways it is wider and keeps the desktop one. */
+  const PHONE_MAX = 900;
   const SETTINGS_KEY = "lifeboard:settings"; // small separate slot for UI toggles that should persist, kept apart from the task tree itself
   const TODAY = todayStr();
   const S = 2.2;
@@ -2213,7 +2232,7 @@
     throw last || new Error("No model answered");
   }
   let lastSnapshot = null, parsing = false, pendingCS = null;
-  let soundOn = true, viewMode = "bubbles", motionMode = "camera", showDailies = true, expandedId = null, listSort = "state", showDormant = false, showBubbleWords = false, deckExpanded = false, sidePanelMode = null, scatterMode = "grouped", revealMode = "off", tapRevealId = null, deckOpen = false;   // starts off: fanned children on every touch is a lot to meet first // revealMode: "off" | "hover" | "tap" | "always" // sidePanelMode: null | "list" | "scatter" | "deleted"; scatterMode: "grouped" | "individual"
+  let liteMode = false, soundOn = true, viewMode = "bubbles", motionMode = "camera", showDailies = true, expandedId = null, listSort = "state", showDormant = false, showBubbleWords = false, deckExpanded = false, sidePanelMode = null, scatterMode = "grouped", revealMode = "off", tapRevealId = null, deckOpen = false;   // starts off: fanned children on every touch is a lot to meet first // revealMode: "off" | "hover" | "tap" | "always" // sidePanelMode: null | "list" | "scatter" | "deleted"; scatterMode: "grouped" | "individual"
   let dragCtx = null, dragHandledId = null, dragHandledAt = 0; // bubble drag reorder state
   let dragRafScheduled = false, dragPendingPos = null; // batches the ring-reflow to once per animation frame
   let dailyDragCtx = null, dailyDragHandledId = null, dailyDragHandledAt = 0; // daily pill drag reorder state
@@ -2229,6 +2248,7 @@
     list: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="5.5" y1="4" x2="13" y2="4"/><line x1="5.5" y1="8" x2="13" y2="8"/><line x1="5.5" y1="12" x2="13" y2="12"/><circle cx="2.6" cy="4" r="1.1" fill="currentColor"/><circle cx="2.6" cy="8" r="1.1" fill="currentColor"/><circle cx="2.6" cy="12" r="1.1" fill="currentColor"/></svg>',
     camera: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6V4.2A1.2 1.2 0 014.2 3H6"/><path d="M13 6V4.2A1.2 1.2 0 0011.8 3H10"/><path d="M3 10v1.8A1.2 1.2 0 004.2 13H6"/><path d="M13 10v1.8A1.2 1.2 0 0111.8 13H10"/><circle cx="8" cy="8" r="1.7"/></svg>',
     fan: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="8" y1="8" x2="8" y2="3.5"/><line x1="8" y1="8" x2="12.2" y2="10.5"/><line x1="8" y1="8" x2="3.8" y2="10.5"/><circle cx="8" cy="2.8" r="1.2" fill="currentColor"/><circle cx="12.8" cy="11" r="1.2" fill="currentColor"/><circle cx="3.2" cy="11" r="1.2" fill="currentColor"/></svg>',
+    lite: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 1.8L3.6 9H8l-1 5.2L12.4 7H8z"/></svg>',
     soundon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6v4h2.3L9 12.5v-9L5.3 6H3z" fill="currentColor" stroke="none"/><path d="M11 6.4c.5.5.8 1 .8 1.6s-.3 1.1-.8 1.6"/><path d="M12.6 5c.9.9 1.4 1.9 1.4 3s-.5 2.1-1.4 3"/></svg>',
     soundoff: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6v4h2.3L9 12.5v-9L5.3 6H3z" fill="currentColor" stroke="none"/><line x1="11" y1="6" x2="14" y2="10"/><line x1="14" y1="6" x2="11" y2="10"/></svg>',
     repeat: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8a4 4 0 014-4h3.5"/><path d="M9.5 2l2 2-2 2"/><path d="M12 8a4 4 0 01-4 4H4.5"/><path d="M6.5 14l-2-2 2-2"/></svg>',
@@ -3362,13 +3382,18 @@
         if (typeof s.showDailies === "boolean") showDailies = s.showDailies;
         if (["off","hover","tap","always"].indexOf(s.revealMode) !== -1) revealMode = s.revealMode;
         if (typeof s.deckOpen === "boolean") deckOpen = s.deckOpen;
+        if (typeof s.liteMode === "boolean") liteMode = s.liteMode;
         if (["builtin","anthropic","google"].indexOf(s.aiProvider) !== -1) aiProvider = s.aiProvider;
         if (typeof s.aiKey === "string") aiKey = s.aiKey;
         document.body.classList.toggle("deckOpen", deckOpen);
       }
     } catch (e) {}
+    applyLite();
   }
-  async function saveSettings() { try { await STORE.set(SETTINGS_KEY, JSON.stringify({ showDailies: showDailies, revealMode: revealMode, deckOpen: deckOpen, aiProvider: aiProvider, aiKey: aiKey })); } catch (e) {} }
+  /* Lite mode is per device. It lives in the settings slot, which sync never touches, so the tablet
+     can run it while the phone and PC keep the full look. */
+  function applyLite() { document.documentElement.classList.toggle("lite", liteMode); }
+  async function saveSettings() { try { await STORE.set(SETTINGS_KEY, JSON.stringify({ showDailies: showDailies, revealMode: revealMode, deckOpen: deckOpen, liteMode: liteMode, aiProvider: aiProvider, aiKey: aiKey })); } catch (e) {} }
   function clone(o) { return JSON.parse(JSON.stringify(o)); }
   function findNode(id, node = tree) { if (node.id === id) return node; if (node.children) for (const c of node.children) { const f = findNode(id, c); if (f) return f; } return null; }
   function findParent(id, node = tree) { if (!node.children) return null; for (const c of node.children) { if (c.id === id) return node; const f = findParent(id, c); if (f) return f; } return null; }
@@ -4821,7 +4846,7 @@
     const longBump = labLen > 24 ? (isCenter ? 26 : 22) : labLen > 16 ? (isCenter ? 14 : 12) : 0;
     // Sized off the viewport width, which on a phone left them at the minimum while the taller
     // board went unused. Phones get their own, larger, numbers.
-    const phone = window.innerWidth <= 700;
+    const phone = window.innerWidth <= PHONE_MAX;
     const base = isCenter
       ? (phone ? { min: 96, vw: 24, max: 118 } : { min: 96, vw: 22, max: 150 })
       : (phone ? { min: 78, vw: 21, max: 104 } : { min: 78, vw: 18, max: 116 });
@@ -5655,7 +5680,7 @@
       let host = document.getElementById("tdNotes");
       // Above the board on a phone. Under the history it was the furthest possible point from the
       // icon that opened it, and the keyboard covered it outright.
-      const phone = !(window.innerWidth > 780);
+      const phone = !(window.innerWidth > PHONE_MAX);
       if (phone) {
         if (host && host.parentElement !== box) { host.remove(); host = null; }
         if (!host) { host = document.createElement("div"); host.id = "tdNotes"; box.insertBefore(host, box.firstChild); }
@@ -5664,7 +5689,7 @@
       // Wide screens: attached to the body so the fixed corner positions resolve against the screen.
       // Narrow screens: the notes are stacked in normal flow, so on the body they landed at the very
       // bottom of the page under the footer links. There they sit with the task instead.
-      const wantBody = window.innerWidth > 780;
+      const wantBody = window.innerWidth > PHONE_MAX;
       const parent = wantBody ? document.body : (box.querySelector(".tdBelow") || box);
       if (host && host.parentElement !== parent) { host.remove(); host = null; }
       if (!host) { host = document.createElement("div"); host.id = "tdNotes"; parent.appendChild(host); }
@@ -6986,6 +7011,8 @@
     { label: () => motionMode === "camera" ? "Motion: zoom" : "Motion: fan out",
       icon: () => motionMode === "camera" ? IC.camera : IC.fan,
       on: () => true, act: () => document.getElementById("motionBtn").click(), keep: true },
+    { label: () => liteMode ? "Lite mode: on" : "Lite mode (older devices)", icon: () => IC.lite,
+      on: () => liteMode, act: () => { liteMode = !liteMode; applyLite(); saveSettings(); tapSnd(); }, keep: true },
     { label: "Sound", icon: () => soundOn ? IC.soundon : IC.soundoff,
       on: () => soundOn, act: () => document.getElementById("soundBtn").click(), keep: true },
     { sep: true },
@@ -7290,7 +7317,7 @@
   // The plus opens the type row on a phone rather than the form, since typing is the faster route
   // and the form is one more tap away from there.
   document.getElementById("addTile").addEventListener("click", () => {
-    if (window.innerWidth > 700) return;
+    if (window.innerWidth > PHONE_MAX) return;
     asOpen();
   }, true);
   document.getElementById("sparkBtn").onclick = () => { tapSnd(); openSpark(); };
@@ -7558,7 +7585,7 @@
     tapSnd(); render();
     showToast("Added " + label);
   };
-  document.getElementById("addTile").onclick = () => { tapSnd(); if (window.innerWidth > 700) openAddForm(null); };
+  document.getElementById("addTile").onclick = () => { tapSnd(); if (window.innerWidth > PHONE_MAX) openAddForm(null); };
   // Same drifting sparks as the Spark panel, at tile scale.
   (function tileSparks() {
     const wrap = document.getElementById("tileEmbers");
@@ -8510,7 +8537,7 @@
     { id: "orbit", label: "Orbit", icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="4"/><circle cx="19" cy="7" r="2.2"/><circle cx="5.2" cy="8" r="1.8"/><circle cx="8" cy="19.5" r="2"/></svg>' }
   ];
   let mobileTab = "capture";
-  function isPhone() { return window.matchMedia("(max-width: 700px)").matches; }
+  function isPhone() { return window.matchMedia("(max-width: " + PHONE_MAX + "px)").matches; }
   function setTab(id, fromResize) {
     mobileTab = id;
     document.body.classList.remove("tab-capture", "tab-today", "tab-orbit");
